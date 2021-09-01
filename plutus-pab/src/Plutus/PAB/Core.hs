@@ -66,7 +66,6 @@ module Plutus.PAB.Core
     , finalResult
     , waitUntilFinished
     , blockchainEnv
-    , valueAtSTM
     , valueAt
     , askUserEnv
     , askBlockchainEnv
@@ -83,9 +82,11 @@ module Plutus.PAB.Core
     , timed
     ) where
 
+import qualified Cardano.Wallet.Mock                     as Mock
 import           Control.Applicative                     (Alternative (..))
 import           Control.Concurrent.STM                  (STM)
 import qualified Control.Concurrent.STM                  as STM
+import           Control.Lens                            (view)
 import           Control.Monad                           (forM, guard, void)
 import           Control.Monad.Freer                     (Eff, LastMember, Member, interpret, reinterpret, runM, send,
                                                           subsume, type (~>))
@@ -97,13 +98,16 @@ import           Control.Monad.IO.Class                  (MonadIO (..))
 import qualified Data.Aeson                              as JSON
 import           Data.Foldable                           (traverse_)
 import qualified Data.Map                                as Map
+import           Data.Maybe                              (catMaybes)
 import           Data.Proxy                              (Proxy (..))
 import           Data.Set                                (Set)
 import           Data.Text                               (Text)
-import           Ledger.Tx                               (Address, Tx)
+import           Ledger                                  (addressCredential, ciTxOutValue, pubKeyHashAddress)
+import           Ledger.Tx                               (Tx)
 import           Ledger.TxId                             (TxId)
 import           Ledger.Value                            (Value)
 import           Plutus.ChainIndex                       (ChainIndexQueryEffect)
+import qualified Plutus.ChainIndex                       as ChainIndex
 import           Plutus.Contract.Effects                 (ActiveEndpoint (..), PABReq, TxStatus (Unknown))
 import           Plutus.PAB.Core.ContractInstance        (ContractInstanceMsg, ContractInstanceState)
 import qualified Plutus.PAB.Core.ContractInstance        as ContractInstance
@@ -126,7 +130,7 @@ import qualified Wallet.API                              as WAPI
 import           Wallet.Effects                          (NodeClientEffect, WalletEffect)
 import           Wallet.Emulator.LogMessages             (RequestHandlerLogMsg, TxBalanceMsg)
 import           Wallet.Emulator.MultiAgent              (EmulatorEvent' (..), EmulatorTimeEvent (..))
-import           Wallet.Emulator.Wallet                  (Wallet, WalletEvent (..))
+import           Wallet.Emulator.Wallet                  (Wallet, WalletEvent (..), isEmulatorWallet, walletAddress)
 import           Wallet.Types                            (ContractInstanceId, EndpointDescription (..),
                                                           NotificationError)
 
@@ -552,15 +556,18 @@ finalResult instanceId = do
     instancesState <- asks @(PABEnvironment t env) instancesState
     pure $ Instances.finalResult instanceId instancesState
 
--- | An STM transaction returning the value at an address
-valueAtSTM :: forall t env. Address -> PABAction t env (STM Value)
-valueAtSTM address = do
-    blockchainEnv <- asks @(PABEnvironment t env) blockchainEnv
-    return $ Instances.valueAt address blockchainEnv
-
--- | The value at an address
-valueAt :: forall t env. Address -> PABAction t env Value
-valueAt address = valueAtSTM address >>= liftIO . STM.atomically
+-- | The value in a wallet.
+--
+-- TODO: Change from 'Wallet' to 'Address' (see SCP-2208)
+valueAt :: Wallet -> PABAction t env Value
+valueAt wallet = do
+    let addr = if isEmulatorWallet wallet
+                then walletAddress wallet
+                else pubKeyHashAddress (Mock.walletPubKey wallet)
+    handleAgentThread wallet $ do
+      txOutRefs <- ChainIndex.pageItems . snd <$> ChainIndex.utxoSetAtAddress (addressCredential addr)
+      txOutsM <- traverse ChainIndex.txOutFromRef txOutRefs
+      pure $ foldMap (view ciTxOutValue) $ catMaybes  txOutsM
 
 -- | Wait until the contract is done, then return
 --   the error (if any)
@@ -625,4 +632,3 @@ handleTimeEffect = \case
     SystemTime -> do
         Instances.BlockchainEnv{Instances.beCurrentSlot} <- asks @(PABEnvironment t env) blockchainEnv
         liftIO $ STM.readTVarIO beCurrentSlot
-

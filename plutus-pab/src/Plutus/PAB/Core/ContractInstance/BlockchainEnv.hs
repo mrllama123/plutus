@@ -18,9 +18,7 @@ import           Cardano.Protocol.Socket.Client         (ChainSyncEvent (..))
 import qualified Cardano.Protocol.Socket.Client         as Client
 import qualified Cardano.Protocol.Socket.Mock.Client    as MockClient
 import qualified Data.Map                               as Map
-import           Ledger                                 (Block, OnChainTx, Slot, TxId (..))
-import           Ledger.AddressMap                      (AddressMap)
-import qualified Ledger.AddressMap                      as AddressMap
+import           Ledger                                 (Block, Slot, TxId (..))
 import           Plutus.Contract.Effects                (TxStatus (..), TxValidity (..), increaseDepth)
 import           Plutus.PAB.Core.ContractInstance.STM   (BlockchainEnv (..), InstanceClientEnv (..), InstancesState,
                                                          OpenTxOutProducedRequest (..), OpenTxOutSpentRequest (..),
@@ -33,7 +31,6 @@ import           Control.Concurrent.STM                 (STM)
 import qualified Control.Concurrent.STM                 as STM
 import           Control.Lens
 import           Control.Monad                          (foldM, forM_, unless, void, when)
-import           Data.Foldable                          (foldl')
 import           Data.Map                               (Map)
 import           Ledger.TimeSlot                        (SlotConfig)
 import           Plutus.ChainIndex                      (ChainIndexTx (..), ChainIndexTxOutputs (..), citxTxId,
@@ -109,27 +106,16 @@ insertNewTx oldMap (txi, txValidity) = do
 -- | Go through the transactions in a block, updating the 'BlockchainEnv'
 --   when any interesting addresses or transactions have changed.
 processMockBlock :: InstancesState -> BlockchainEnv -> Block -> Slot -> STM ()
-processMockBlock instancesState BlockchainEnv{beAddressMap, beTxChanges, beCurrentSlot} transactions slot = do
+processMockBlock instancesState BlockchainEnv{beTxChanges, beCurrentSlot} transactions slot = do
   changes <- STM.readTVar beTxChanges
   forM_ changes $ \tv -> STM.modifyTVar tv increaseDepth
   lastSlot <- STM.readTVar beCurrentSlot
   when (slot > lastSlot) $ do
     STM.writeTVar beCurrentSlot slot
   unless (null transactions) $ do
-    addressMap <- STM.readTVar beAddressMap
-    let addressMap' = foldl' (processTx slot) addressMap transactions
-    STM.writeTVar beAddressMap addressMap'
-
     txStatusMap <- STM.readTVar beTxChanges
     txStatusMap' <- foldM insertNewTx txStatusMap (txMockEvent <$> fmap fromOnChainTx transactions)
     STM.writeTVar beTxChanges txStatusMap'
 
     instEnv <- S.instancesClientEnv instancesState
     updateInstances (indexBlock $ fmap fromOnChainTx transactions) instEnv
-
-processTx :: Slot -> AddressMap -> OnChainTx -> AddressMap
-processTx _ addressMap tx = addressMap' where
-  -- TODO: Will be removed in a future issue
-  addressMap' = AddressMap.updateAllAddresses tx addressMap
-  -- TODO: updateInstances
-  -- We need to switch to using 'ChainIndexTx' everyhwere first, though.
